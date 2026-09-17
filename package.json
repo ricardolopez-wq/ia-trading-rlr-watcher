@@ -1,0 +1,14 @@
+{
+  "name": "ia-trading-rlr-watcher",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Vigilante de mercado en modo simulación para IA Trading RLR",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node watcher.mjs",
+    "test": "node --test"
+  }
+}
