@@ -49,6 +49,19 @@ async function sendToDashboard(payload) {
   return result;
 }
 
+async function publish(payload) {
+  try {
+    const dashboard = await sendToDashboard(payload);
+    console.log(JSON.stringify({ ...payload, dashboardAccepted: true, alertsCreated: dashboard.alerts?.length || 0 }));
+  } catch (error) {
+    console.warn(JSON.stringify({
+      ...payload,
+      dashboardAccepted: false,
+      dashboardError: error instanceof Error ? error.message : "No fue posible actualizar el tablero"
+    }));
+  }
+}
+
 async function main() {
   const checkedAt = new Date().toISOString();
   try {
@@ -64,8 +77,7 @@ async function main() {
         prices: {},
         executionEnabled: false
       };
-      const dashboard = await sendToDashboard(payload);
-      console.log(JSON.stringify({ ...payload, dashboardAccepted: true, alertsCreated: dashboard.alerts?.length || 0 }));
+      await publish(payload);
       return;
     }
 
@@ -85,8 +97,7 @@ async function main() {
       maxLossMxn: 5000,
       executionEnabled: false
     };
-    const dashboard = await sendToDashboard(payload);
-    console.log(JSON.stringify({ ...payload, dashboardAccepted: true, alertsCreated: dashboard.alerts?.length || 0 }));
+    await publish(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Error desconocido";
     try {
