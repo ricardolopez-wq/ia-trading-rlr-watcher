@@ -10,3 +10,9 @@ services:
         sync: false
       - key: ALPACA_PAPER_SECRET_KEY
         sync: false
+      - key: ALERT_WEBHOOK_URL
+        sync: false
+      - key: ALERT_WEBHOOK_SECRET
+        sync: false
+      - key: SITES_BYPASS_TOKEN
+        sync: false
