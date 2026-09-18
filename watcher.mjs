@@ -40,6 +40,7 @@ async function sendToDashboard(payload) {
     method: "POST",
     headers: {
       "content-type": "application/json",
+      "OAI-Sites-Authorization": `Bearer ${requiredEnv("SITES_BYPASS_TOKEN")}`,
       "x-alert-secret": requiredEnv("ALERT_WEBHOOK_SECRET")
     },
     body: JSON.stringify(payload)
