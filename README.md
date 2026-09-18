@@ -26,5 +26,8 @@ Variables privadas requeridas en Render:
 
 - `ALPACA_PAPER_API_KEY`
 - `ALPACA_PAPER_SECRET_KEY`
+- `ALERT_WEBHOOK_URL`
+- `ALERT_WEBHOOK_SECRET`
+- `SITES_BYPASS_TOKEN`
 
 Nunca escribas los valores de esas variables dentro de GitHub.
