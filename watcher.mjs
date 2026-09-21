@@ -1,7 +1,24 @@
 const DATA_URL = "https://data.alpaca.markets";
 const TRADING_URL = "https://paper-api.alpaca.markets";
 const GRAPH_URL = "https://graph.facebook.com";
-const SYMBOLS = ["SPY", "VOO", "MSFT"];
+const US_SYMBOLS = ["SPY", "QQQ", "VOO", "MSFT", "NVDA", "AMZN", "AAPL", "META", "GOOGL", "TSLA", "AVGO", "AMD"];
+const MEXICO_SYMBOLS = {
+  "NAFTRAC": "NAFTRACISHRS.MX",
+  "WALMEX": "WALMEX.MX",
+  "AMXL": "AMXL.MX",
+  "FEMSAUBD": "FEMSAUBD.MX",
+  "CEMEXCPO": "CEMEXCPO.MX",
+  "BIMBOA": "BIMBOA.MX",
+  "GMEXICOB": "GMEXICOB.MX",
+  "GAPB": "GAPB.MX",
+  "ASURB": "ASURB.MX",
+  "GCARSOA1": "GCARSOA1.MX",
+  "VISTAA": "VISTAA.MX",
+  "TLEVISACPO": "TLEVISACPO.MX",
+  "FMTY14": "FMTY14.MX",
+  "DANHOS13": "DANHOS13.MX",
+  "KIMBERA": "KIMBERA.MX"
+};
 
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -30,6 +47,58 @@ async function getJson(url) {
   return response.json();
 }
 
+async function getPublicJson(url) {
+  const response = await fetch(url, {
+    headers: { accept: "application/json", "user-agent": "IA-Trading-RLR/1.0" }
+  });
+  if (!response.ok) throw new Error(`Fuente pública respondió ${response.status}`);
+  return response.json();
+}
+
+async function fetchYahooQuote(symbol, displaySymbol, market) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=5m&range=5d`;
+  const data = await getPublicJson(url);
+  const chart = data?.chart?.result?.[0];
+  if (!chart) throw new Error(`Sin cotización para ${displaySymbol}`);
+  const meta = chart.meta || {};
+  const timestamps = chart.timestamp || [];
+  const quoteData = chart.indicators?.quote?.[0] || {};
+  const latestIndex = timestamps.length - 1;
+  const timestamp = Number(timestamps[latestIndex]) * 1000;
+  const latestVolume = Number(quoteData.volume?.[latestIndex]);
+  const current = Number(meta.regularMarketPrice);
+  const previousClose = Number(meta.chartPreviousClose ?? meta.previousClose);
+  const ageMinutes = Number.isFinite(timestamp) ? Math.max(0, (Date.now() - timestamp) / 60000) : null;
+  return {
+    market,
+    route: market === "MX" ? "Trading MX" : "SIC",
+    source: "Yahoo public chart (experimental)",
+    sourceSymbol: symbol,
+    currency: meta.currency || (market === "MX" ? "MXN" : "USD"),
+    trade: Number.isFinite(current) ? current : null,
+    close: Number.isFinite(current) ? current : null,
+    previousClose: Number.isFinite(previousClose) ? previousClose : null,
+    volume: Number.isFinite(latestVolume) ? latestVolume : null,
+    timestamp: Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null,
+    ageMinutes,
+    tradeableForSimulation: market !== "MX" || (meta.currency === "MXN" && Number.isFinite(ageMinutes) && ageMinutes <= 15),
+    realTradingAuthorized: false
+  };
+}
+
+async function fetchMexicoPrices() {
+  const entries = Object.entries(MEXICO_SYMBOLS);
+  const settled = await Promise.allSettled(entries.map(([display, source]) =>
+    fetchYahooQuote(source, display, "MX").then((value) => [display, value])
+  ));
+  return Object.fromEntries(settled.filter((item) => item.status === "fulfilled").map((item) => item.value));
+}
+
+async function fetchUsdMxn() {
+  const quote = await fetchYahooQuote("MXN=X", "USD/MXN", "FX");
+  return quote.trade;
+}
+
 function quote(snapshot) {
   const numberOrNull = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
   return {
@@ -37,7 +106,12 @@ function quote(snapshot) {
     bid: numberOrNull(snapshot?.latestQuote?.bp),
     trade: numberOrNull(snapshot?.latestTrade?.p),
     close: numberOrNull(snapshot?.minuteBar?.c ?? snapshot?.dailyBar?.c ?? snapshot?.prevDailyBar?.c),
-    previousClose: numberOrNull(snapshot?.prevDailyBar?.c)
+    previousClose: numberOrNull(snapshot?.prevDailyBar?.c),
+    market: "US",
+    route: "SIC",
+    source: "Alpaca IEX",
+    currency: "USD",
+    realTradingAuthorized: false
   };
 }
 
@@ -55,13 +129,14 @@ function marketCandidates(prices) {
     .filter((item) =>
       Number.isFinite(item.changePct) &&
       Math.abs(item.changePct) >= 0.4 &&
-      (!Number.isFinite(item.spreadPct) || item.spreadPct <= 0.8)
+      (!Number.isFinite(item.spreadPct) || item.spreadPct <= 0.8) &&
+      (item.market !== "MX" || item.tradeableForSimulation === true)
     )
     .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
-    .slice(0, 3);
+    .slice(0, 6);
 }
 
-async function analyzeWithAI(prices, checkedAt) {
+async function analyzeWithAI(prices, checkedAt, fxUsdMxn) {
   const candidates = marketCandidates(prices);
   if (!candidates.length) {
     return { status: "ESPERAR", reason: "No hay movimientos que superen el filtro previo de 0.4%.", candidates: [] };
@@ -72,12 +147,18 @@ async function analyzeWithAI(prices, checkedAt) {
     "Trabajas exclusivamente en SIMULACIÓN; nunca afirmes que ejecutaste una orden.",
     "Capital total: 100000 MXN. Bolsa intradía máxima: 20000 MXN.",
     "Riesgo máximo por operación: 500 MXN. Pérdida diaria máxima: 1000 MXN. Bloqueo acumulado: 5000 MXN.",
-    "Solo tienes cotizaciones IEX; no tienes noticias, fundamentales ni precios de México/SIC.",
+    "Analizas simultáneamente Trading MX y EUA/SIC. EUA usa Alpaca IEX; México usa una fuente pública experimental solo para simulación.",
     "Si los datos no bastan, elige ESPERAR. No inventes información.",
     "Devuelve exclusivamente JSON válido con: status (PROPONER o ESPERAR), strategy, symbol, action, orderType, entryMin, entryMax, capitalMxn, target, stop, validity, cancelIf, rationale, confidence y dataLimitations.",
-    "Para PROPONER usa orden LIMITADA, capitalMxn <= 20000 y una relación beneficio/riesgo razonable después de costos.",
+    "Para PROPONER usa orden LIMITADA, capitalMxn <= 20000, riesgo <= 500 MXN y considera un costo estimado total de entrada y salida de 0.50%.",
+    "No propongas México si tradeableForSimulation no es true. No autorices dinero real con fuentes experimentales.",
+    "Incluye además market, route, currency, titles, estimatedRoundTripCostMxn y riskMxn.",
     `Hora UTC: ${checkedAt}`,
-    `Candidatos: ${JSON.stringify(candidates)}`
+    `Tipo de cambio USD/MXN: ${fxUsdMxn || "no disponible"}`,
+    `Candidatos: ${JSON.stringify(candidates.map((item) => ({
+      ...item,
+      priceMxn: item.currency === "USD" && fxUsdMxn ? (item.trade ?? item.close) * fxUsdMxn : (item.trade ?? item.close)
+    })))}`
   ].join("\n");
 
   const response = await fetch(OPENAI_URL, {
@@ -253,27 +334,22 @@ async function main() {
   const checkedAt = new Date().toISOString();
   try {
     const clock = await getJson(`${TRADING_URL}/v2/clock`);
-    if (!clock.is_open) {
-      const payload = {
-        service: "IA Trading RLR",
-        mode: "SIMULACION",
-        checkedAt,
-        marketOpen: false,
-        nextOpen: clock.next_open,
-        dataFeed: "IEX",
-        prices: {},
-        executionEnabled: false
-      };
-      await publish(payload);
-      return;
+    const [mexicoPrices, fxUsdMxn] = await Promise.all([
+      fetchMexicoPrices(),
+      fetchUsdMxn().catch(() => null)
+    ]);
+
+    let usPrices = {};
+    if (clock.is_open) {
+      const query = encodeURIComponent(US_SYMBOLS.join(","));
+      const snapshots = await getJson(`${DATA_URL}/v2/stocks/snapshots?symbols=${query}&feed=iex`);
+      usPrices = Object.fromEntries(US_SYMBOLS.map((symbol) => [symbol, quote(snapshots[symbol])]));
     }
 
-    const query = encodeURIComponent(SYMBOLS.join(","));
-    const snapshots = await getJson(`${DATA_URL}/v2/stocks/snapshots?symbols=${query}&feed=iex`);
-    const prices = Object.fromEntries(SYMBOLS.map((symbol) => [symbol, quote(snapshots[symbol])]));
+    const prices = { ...mexicoPrices, ...usPrices };
     let aiAnalysis;
     try {
-      aiAnalysis = await analyzeWithAI(prices, checkedAt);
+      aiAnalysis = await analyzeWithAI(prices, checkedAt, fxUsdMxn);
     } catch (error) {
       aiAnalysis = {
         status: "ESPERAR",
@@ -285,8 +361,10 @@ async function main() {
       service: "IA Trading RLR",
       mode: "SIMULACION",
       checkedAt,
-      marketOpen: true,
-      dataFeed: "IEX",
+      marketOpen: clock.is_open,
+      mexicoMarketDataAvailable: Object.keys(mexicoPrices).length > 0,
+      dataFeeds: { us: "Alpaca IEX", mexico: "Yahoo public chart (experimental, simulation only)" },
+      fxUsdMxn,
       prices,
       tradingCapitalMxn: 100000,
       intradayCapitalMxn: 20000,
