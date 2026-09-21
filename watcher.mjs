@@ -178,12 +178,15 @@ function validateProposal(analysis, candidates, fxUsdMxn) {
   }
 
   const actualCapitalMxn = unitCostMxn * titles;
+  const validatedRiskMxn = ((entryMax - stop) * fx * titles) + actualCapitalMxn * 0.005;
   return {
     ...analysis,
+    aiRationale: analysis.rationale || null,
+    rationale: `Control matemático validado: ${titles} título(s), capital ${actualCapitalMxn.toFixed(2)} MXN y riesgo total estimado ${validatedRiskMxn.toFixed(2)} MXN. Simulación únicamente; requiere autorización manual y validación final en GBM.`,
     titles,
     capitalMxn: Number(actualCapitalMxn.toFixed(2)),
     estimatedRoundTripCostMxn: Number((actualCapitalMxn * 0.005).toFixed(2)),
-    riskMxn: Number((((entryMax - stop) * fx * titles) + actualCapitalMxn * 0.005).toFixed(2))
+    riskMxn: Number(validatedRiskMxn.toFixed(2))
   };
 }
 
