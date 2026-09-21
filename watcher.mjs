@@ -19,6 +19,7 @@ const MEXICO_SYMBOLS = {
   "DANHOS13": "DANHOS13.MX",
   "KIMBERA": "KIMBERA.MX"
 };
+const GBM_VALIDATION_MAX_AGE_MINUTES = 10;
 
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -77,13 +78,65 @@ async function fetchYahooQuote(symbol, displaySymbol, market) {
     currency: meta.currency || (market === "MX" ? "MXN" : "USD"),
     trade: Number.isFinite(current) ? current : null,
     close: Number.isFinite(current) ? current : null,
-    previousClose: Number.isFinite(previousClose) ? previousClose : null,
-    volume: Number.isFinite(latestVolume) ? latestVolume : null,
+    previousClose: market === "MX" ? null : (Number.isFinite(previousClose) ? previousClose : null),
+    volume: market === "MX" ? null : (Number.isFinite(latestVolume) ? latestVolume : null),
     timestamp: Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null,
     ageMinutes,
-    tradeableForSimulation: market !== "MX" || (meta.currency === "MXN" && Number.isFinite(ageMinutes) && ageMinutes <= 15),
+    dataQuality: market === "MX" ? "REFERENCE_ONLY" : "AUTOMATED_FEED",
+    tradeableForSimulation: market !== "MX",
     realTradingAuthorized: false
   };
+}
+
+export function readGbmValidatedQuotes() {
+  const raw = optionalEnv("GBM_VALIDATED_QUOTES_JSON");
+  if (!raw) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.warn("GBM_VALIDATED_QUOTES_JSON no contiene JSON válido; se ignorará.");
+    return {};
+  }
+
+  const now = Date.now();
+  const validated = {};
+  for (const [symbol, input] of Object.entries(parsed || {})) {
+    if (!MEXICO_SYMBOLS[symbol]) continue;
+    const trade = Number(input?.trade);
+    const bid = Number(input?.bid);
+    const ask = Number(input?.ask);
+    const changePct = Number(input?.changePct);
+    const capturedMs = Date.parse(input?.capturedAt);
+    const ageMinutes = Number.isFinite(capturedMs) ? Math.max(0, (now - capturedMs) / 60000) : null;
+    if (
+      !Number.isFinite(trade) || trade <= 0 ||
+      !Number.isFinite(changePct) ||
+      !Number.isFinite(ageMinutes) || ageMinutes > GBM_VALIDATION_MAX_AGE_MINUTES
+    ) continue;
+
+    const previousClose = trade / (1 + changePct / 100);
+    validated[symbol] = {
+      market: "MX",
+      route: "Trading MX",
+      source: "GBM manual validation",
+      sourceSymbol: symbol,
+      currency: "MXN",
+      trade,
+      close: trade,
+      previousClose: Number.isFinite(previousClose) ? previousClose : null,
+      bid: Number.isFinite(bid) && bid > 0 ? bid : null,
+      ask: Number.isFinite(ask) && ask > 0 ? ask : null,
+      volume: Number.isFinite(Number(input?.volume)) ? Number(input.volume) : null,
+      timestamp: new Date(capturedMs).toISOString(),
+      ageMinutes,
+      reportedChangePct: changePct,
+      dataQuality: "GBM_VALIDATED_MANUALLY",
+      tradeableForSimulation: true,
+      realTradingAuthorized: false
+    };
+  }
+  return validated;
 }
 
 async function fetchMexicoPrices() {
@@ -117,12 +170,14 @@ function quote(snapshot) {
 
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
-function marketCandidates(prices) {
+export function marketCandidates(prices) {
   return Object.entries(prices)
     .map(([symbol, price]) => {
       const current = price.trade ?? price.close;
       const previous = price.previousClose;
-      const changePct = current && previous ? ((current - previous) / previous) * 100 : null;
+      const changePct = Number.isFinite(price.reportedChangePct)
+        ? price.reportedChangePct
+        : current && previous ? ((current - previous) / previous) * 100 : null;
       const spreadPct = price.ask && price.bid ? ((price.ask - price.bid) / ((price.ask + price.bid) / 2)) * 100 : null;
       return { symbol, ...price, changePct, spreadPct };
     })
@@ -130,7 +185,10 @@ function marketCandidates(prices) {
       Number.isFinite(item.changePct) &&
       Math.abs(item.changePct) >= 0.4 &&
       (!Number.isFinite(item.spreadPct) || item.spreadPct <= 0.8) &&
-      (item.market !== "MX" || item.tradeableForSimulation === true)
+      (item.market !== "MX" || (
+        item.tradeableForSimulation === true &&
+        item.dataQuality === "GBM_VALIDATED_MANUALLY"
+      ))
     )
     .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
     .slice(0, 6);
@@ -201,12 +259,12 @@ async function analyzeWithAI(prices, checkedAt, fxUsdMxn) {
     "Trabajas exclusivamente en SIMULACIÓN; nunca afirmes que ejecutaste una orden.",
     "Capital total: 100000 MXN. Bolsa intradía máxima: 20000 MXN.",
     "Riesgo máximo por operación: 500 MXN. Pérdida diaria máxima: 1000 MXN. Bloqueo acumulado: 5000 MXN.",
-    "Analizas simultáneamente Trading MX y EUA/SIC. EUA usa Alpaca IEX; México usa una fuente pública experimental solo para simulación.",
+    "Analizas simultáneamente Trading MX y EUA/SIC. EUA usa Alpaca IEX. México solo puede proponerse con una cotización validada manualmente contra GBM.",
     "Si los datos no bastan, elige ESPERAR. No inventes información.",
     "Devuelve exclusivamente JSON válido con: status (PROPONER o ESPERAR), strategy, symbol, action, orderType, entryMin, entryMax, capitalMxn, target, stop, validity, cancelIf, rationale, confidence y dataLimitations.",
     "Para PROPONER usa orden LIMITADA, capitalMxn <= 20000, riesgo <= 500 MXN y considera un costo estimado total de entrada y salida de 0.50%.",
     "Incluye titles como número entero de títulos completos. capitalMxn debe cubrir entryMax * titles convertido a MXN; si no alcanza para 1 título, elige ESPERAR.",
-    "No propongas México si tradeableForSimulation no es true. No autorices dinero real con fuentes experimentales.",
+    "No propongas México si tradeableForSimulation no es true o dataQuality no es GBM_VALIDATED_MANUALLY. No autorices dinero real.",
     "Incluye además market, route, currency, titles, estimatedRoundTripCostMxn y riskMxn.",
     `Hora UTC: ${checkedAt}`,
     `Tipo de cambio USD/MXN: ${fxUsdMxn || "no disponible"}`,
@@ -393,6 +451,7 @@ async function main() {
       fetchMexicoPrices(),
       fetchUsdMxn().catch(() => null)
     ]);
+    const gbmValidatedQuotes = readGbmValidatedQuotes();
 
     let usPrices = {};
     if (clock.is_open) {
@@ -401,7 +460,7 @@ async function main() {
       usPrices = Object.fromEntries(US_SYMBOLS.map((symbol) => [symbol, quote(snapshots[symbol])]));
     }
 
-    const prices = { ...mexicoPrices, ...usPrices };
+    const prices = { ...mexicoPrices, ...gbmValidatedQuotes, ...usPrices };
     let aiAnalysis;
     try {
       aiAnalysis = await analyzeWithAI(prices, checkedAt, fxUsdMxn);
@@ -418,7 +477,12 @@ async function main() {
       checkedAt,
       marketOpen: clock.is_open,
       mexicoMarketDataAvailable: Object.keys(mexicoPrices).length > 0,
-      dataFeeds: { us: "Alpaca IEX", mexico: "Yahoo public chart (experimental, simulation only)" },
+      dataFeeds: {
+        us: "Alpaca IEX",
+        mexicoReference: "Yahoo public chart (reference only)",
+        mexicoValidated: "GBM manual validation"
+      },
+      gbmValidatedQuotes: Object.keys(gbmValidatedQuotes).length,
       fxUsdMxn,
       prices,
       tradingCapitalMxn: 100000,
@@ -456,4 +520,7 @@ async function main() {
   }
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
+import { pathToFileURL } from "node:url";
