@@ -36,7 +36,8 @@ function quote(snapshot) {
     ask: numberOrNull(snapshot?.latestQuote?.ap),
     bid: numberOrNull(snapshot?.latestQuote?.bp),
     trade: numberOrNull(snapshot?.latestTrade?.p),
-    close: numberOrNull(snapshot?.minuteBar?.c ?? snapshot?.dailyBar?.c ?? snapshot?.prevDailyBar?.c)
+    close: numberOrNull(snapshot?.minuteBar?.c ?? snapshot?.dailyBar?.c ?? snapshot?.prevDailyBar?.c),
+    previousClose: numberOrNull(snapshot?.prevDailyBar?.c)
   };
 }
 
@@ -46,7 +47,7 @@ function marketCandidates(prices) {
   return Object.entries(prices)
     .map(([symbol, price]) => {
       const current = price.trade ?? price.close;
-      const previous = price.close;
+      const previous = price.previousClose;
       const changePct = current && previous ? ((current - previous) / previous) * 100 : null;
       const spreadPct = price.ask && price.bid ? ((price.ask - price.bid) / ((price.ask + price.bid) / 2)) * 100 : null;
       return { symbol, ...price, changePct, spreadPct };
