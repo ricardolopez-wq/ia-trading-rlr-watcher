@@ -40,6 +40,74 @@ function quote(snapshot) {
   };
 }
 
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+
+function marketCandidates(prices) {
+  return Object.entries(prices)
+    .map(([symbol, price]) => {
+      const current = price.trade ?? price.close;
+      const previous = price.close;
+      const changePct = current && previous ? ((current - previous) / previous) * 100 : null;
+      const spreadPct = price.ask && price.bid ? ((price.ask - price.bid) / ((price.ask + price.bid) / 2)) * 100 : null;
+      return { symbol, ...price, changePct, spreadPct };
+    })
+    .filter((item) =>
+      Number.isFinite(item.changePct) &&
+      Math.abs(item.changePct) >= 0.4 &&
+      (!Number.isFinite(item.spreadPct) || item.spreadPct <= 0.8)
+    )
+    .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
+    .slice(0, 3);
+}
+
+async function analyzeWithAI(prices, checkedAt) {
+  const candidates = marketCandidates(prices);
+  if (!candidates.length) {
+    return { status: "ESPERAR", reason: "No hay movimientos que superen el filtro previo de 0.4%.", candidates: [] };
+  }
+
+  const prompt = [
+    "Eres el motor prudente de propuestas de IA Trading RLR.",
+    "Trabajas exclusivamente en SIMULACIÓN; nunca afirmes que ejecutaste una orden.",
+    "Capital total: 100000 MXN. Bolsa intradía máxima: 20000 MXN.",
+    "Riesgo máximo por operación: 500 MXN. Pérdida diaria máxima: 1000 MXN. Bloqueo acumulado: 5000 MXN.",
+    "Solo tienes cotizaciones IEX; no tienes noticias, fundamentales ni precios de México/SIC.",
+    "Si los datos no bastan, elige ESPERAR. No inventes información.",
+    "Devuelve exclusivamente JSON válido con: status (PROPONER o ESPERAR), strategy, symbol, action, orderType, entryMin, entryMax, capitalMxn, target, stop, validity, cancelIf, rationale, confidence y dataLimitations.",
+    "Para PROPONER usa orden LIMITADA, capitalMxn <= 20000 y una relación beneficio/riesgo razonable después de costos.",
+    `Hora UTC: ${checkedAt}`,
+    `Candidatos: ${JSON.stringify(candidates)}`
+  ].join("\n");
+
+  const response = await fetch(OPENAI_URL, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${requiredEnv("OPENAI_API_KEY")}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model: optionalEnv("OPENAI_MODEL") || "gpt-5-mini",
+      messages: [
+        { role: "system", content: "Analiza riesgo bursátil de forma conservadora y responde solo JSON válido." },
+        { role: "user", content: prompt }
+      ],
+      response_format: { type: "json_object" },
+      max_completion_tokens: 800
+    })
+  });
+
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = result?.error?.message || `HTTP ${response.status}`;
+    throw new Error(`OpenAI respondió: ${detail}`);
+  }
+
+  const content = result?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("OpenAI no devolvió un análisis utilizable");
+  const analysis = JSON.parse(content);
+  return { ...analysis, candidates, generatedAt: checkedAt, model: optionalEnv("OPENAI_MODEL") || "gpt-5-mini" };
+}
+
 async function sendToDashboard(payload) {
   const response = await fetch(requiredEnv("ALERT_WEBHOOK_URL"), {
     method: "POST",
@@ -193,6 +261,16 @@ async function main() {
     const query = encodeURIComponent(SYMBOLS.join(","));
     const snapshots = await getJson(`${DATA_URL}/v2/stocks/snapshots?symbols=${query}&feed=iex`);
     const prices = Object.fromEntries(SYMBOLS.map((symbol) => [symbol, quote(snapshots[symbol])]));
+    let aiAnalysis;
+    try {
+      aiAnalysis = await analyzeWithAI(prices, checkedAt);
+    } catch (error) {
+      aiAnalysis = {
+        status: "ESPERAR",
+        reason: "El análisis de IA no estuvo disponible; no se propone ninguna operación.",
+        error: error instanceof Error ? error.message : "Error desconocido"
+      };
+    }
     const payload = {
       service: "IA Trading RLR",
       mode: "SIMULACION",
@@ -200,10 +278,14 @@ async function main() {
       marketOpen: true,
       dataFeed: "IEX",
       prices,
-      capitalVirtualMxn: 360000,
-      vehicleReserveMxn: 260000,
       tradingCapitalMxn: 100000,
+      intradayCapitalMxn: 20000,
+      reserveMxn: 80000,
+      maxRiskPerTradeMxn: 500,
+      maxDailyLossMxn: 1000,
       maxLossMxn: 5000,
+      aiConnected: true,
+      aiAnalysis,
       executionEnabled: false
     };
     await publish(payload);
