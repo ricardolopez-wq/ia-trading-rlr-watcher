@@ -136,6 +136,57 @@ function marketCandidates(prices) {
     .slice(0, 6);
 }
 
+function validateProposal(analysis, candidates, fxUsdMxn) {
+  if (analysis?.status !== "PROPONER") return analysis;
+
+  const candidate = candidates.find((item) => item.symbol === analysis.symbol);
+  const entryMax = Number(analysis.entryMax);
+  const stop = Number(analysis.stop);
+  const proposedCapital = Number(analysis.capitalMxn);
+  const currency = analysis.currency || candidate?.currency;
+  const fx = currency === "USD" ? Number(fxUsdMxn) : 1;
+  const unitCostMxn = entryMax * fx;
+  const titles = Math.floor(proposedCapital / unitCostMxn);
+  const estimatedCostMxn = proposedCapital * 0.005;
+  const priceRiskMxn = (entryMax - stop) * fx * titles;
+  const totalRiskMxn = priceRiskMxn + estimatedCostMxn;
+
+  const invalid = (
+    analysis.action !== "BUY" ||
+    analysis.orderType !== "LIMITADA" ||
+    !candidate ||
+    !Number.isFinite(fx) || fx <= 0 ||
+    !Number.isFinite(entryMax) || entryMax <= 0 ||
+    !Number.isFinite(stop) || stop <= 0 || stop >= entryMax ||
+    !Number.isFinite(proposedCapital) || proposedCapital <= 0 || proposedCapital > 20000 ||
+    titles < 1 ||
+    !Number.isFinite(totalRiskMxn) || totalRiskMxn > 500
+  );
+
+  if (invalid) {
+    return {
+      status: "ESPERAR",
+      reason: "La propuesta de IA fue rechazada por el control matemático de títulos, capital o riesgo.",
+      rejectedProposal: {
+        symbol: analysis.symbol || null,
+        proposedCapitalMxn: Number.isFinite(proposedCapital) ? proposedCapital : null,
+        unitCostMxn: Number.isFinite(unitCostMxn) ? Number(unitCostMxn.toFixed(2)) : null,
+        titles: Number.isFinite(titles) ? titles : null,
+        calculatedRiskMxn: Number.isFinite(totalRiskMxn) ? Number(totalRiskMxn.toFixed(2)) : null
+      }
+    };
+  }
+
+  const actualCapitalMxn = unitCostMxn * titles;
+  return {
+    ...analysis,
+    titles,
+    capitalMxn: Number(actualCapitalMxn.toFixed(2)),
+    estimatedRoundTripCostMxn: Number((actualCapitalMxn * 0.005).toFixed(2)),
+    riskMxn: Number((((entryMax - stop) * fx * titles) + actualCapitalMxn * 0.005).toFixed(2))
+  };
+}
+
 async function analyzeWithAI(prices, checkedAt, fxUsdMxn) {
   const candidates = marketCandidates(prices);
   if (!candidates.length) {
@@ -151,6 +202,7 @@ async function analyzeWithAI(prices, checkedAt, fxUsdMxn) {
     "Si los datos no bastan, elige ESPERAR. No inventes información.",
     "Devuelve exclusivamente JSON válido con: status (PROPONER o ESPERAR), strategy, symbol, action, orderType, entryMin, entryMax, capitalMxn, target, stop, validity, cancelIf, rationale, confidence y dataLimitations.",
     "Para PROPONER usa orden LIMITADA, capitalMxn <= 20000, riesgo <= 500 MXN y considera un costo estimado total de entrada y salida de 0.50%.",
+    "Incluye titles como número entero de títulos completos. capitalMxn debe cubrir entryMax * titles convertido a MXN; si no alcanza para 1 título, elige ESPERAR.",
     "No propongas México si tradeableForSimulation no es true. No autorices dinero real con fuentes experimentales.",
     "Incluye además market, route, currency, titles, estimatedRoundTripCostMxn y riskMxn.",
     `Hora UTC: ${checkedAt}`,
@@ -195,7 +247,7 @@ async function analyzeWithAI(prices, checkedAt, fxUsdMxn) {
     const finishReason = result?.choices?.[0]?.finish_reason || "sin detalle";
     throw new Error(`OpenAI no devolvió un análisis utilizable (${finishReason})`);
   }
-  const analysis = JSON.parse(content);
+  const analysis = validateProposal(JSON.parse(content), candidates, fxUsdMxn);
   return { ...analysis, candidates, generatedAt: checkedAt, model: optionalEnv("OPENAI_MODEL") || "gpt-5-mini" };
 }
 
