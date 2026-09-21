@@ -93,7 +93,8 @@ async function analyzeWithAI(prices, checkedAt) {
         { role: "user", content: prompt }
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 800
+      reasoning_effort: "low",
+      max_completion_tokens: 2000
     })
   });
 
@@ -103,8 +104,16 @@ async function analyzeWithAI(prices, checkedAt) {
     throw new Error(`OpenAI respondió: ${detail}`);
   }
 
-  const content = result?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("OpenAI no devolvió un análisis utilizable");
+  const rawContent = result?.choices?.[0]?.message?.content;
+  const content = typeof rawContent === "string"
+    ? rawContent
+    : Array.isArray(rawContent)
+      ? rawContent.map((part) => part?.text || "").join("")
+      : "";
+  if (!content.trim()) {
+    const finishReason = result?.choices?.[0]?.finish_reason || "sin detalle";
+    throw new Error(`OpenAI no devolvió un análisis utilizable (${finishReason})`);
+  }
   const analysis = JSON.parse(content);
   return { ...analysis, candidates, generatedAt: checkedAt, model: optionalEnv("OPENAI_MODEL") || "gpt-5-mini" };
 }
